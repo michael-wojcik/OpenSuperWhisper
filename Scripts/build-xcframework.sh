@@ -5,7 +5,7 @@
 # Produces a 3-slice dynamic xcframework:
 #   1. macOS arm64
 #   2. iOS device arm64
-#   3. iOS simulator arm64 + x86_64
+#   3. iOS simulator arm64 (+ x86_64 when INCLUDE_X86_64=1)
 #
 # Output: libwhisper/whisper.cpp/build-apple/whisper.xcframework
 #
@@ -24,6 +24,10 @@ set -eo pipefail
 # ----- Configuration -----
 IOS_MIN_OS_VERSION=17.0
 MACOS_MIN_OS_VERSION=14.0
+
+# Include x86_64 in simulator slice (for Intel Mac compatibility)
+# Default: arm64-only for faster local builds. Set INCLUDE_X86_64=1 for full compatibility.
+INCLUDE_X86_64=${INCLUDE_X86_64:-0}
 
 # Metal GPU acceleration
 GGML_METAL=ON
@@ -361,12 +365,17 @@ create_dynamic_lib() {
 
 # ===== BUILD =====
 
+SIM_ARCHS="arm64"
+if [[ "$INCLUDE_X86_64" == "1" ]]; then
+    SIM_ARCHS="arm64+x86_64"
+fi
+
 echo ""
 echo "=========================================="
 echo "Building whisper.xcframework"
 echo "  macOS ${MACOS_MIN_OS_VERSION} (arm64)"
 echo "  iOS ${IOS_MIN_OS_VERSION} (device arm64)"
-echo "  iOS ${IOS_MIN_OS_VERSION} (simulator arm64+x86_64)"
+echo "  iOS ${IOS_MIN_OS_VERSION} (simulator ${SIM_ARCHS})"
 echo "  Metal: ON, CoreML: OFF, OpenMP: OFF"
 echo "=========================================="
 echo ""
@@ -376,58 +385,82 @@ echo "Cleaning previous builds..."
 rm -rf build-apple
 rm -rf build-ios-sim-arm64
 rm -rf build-ios-sim-x86_64
+rm -rf build-ios-sim-fat
 rm -rf build-ios-device
 rm -rf build-macos
 
-# ----- 1. iOS Simulator arm64 -----
+if [[ "$INCLUDE_X86_64" == "1" ]]; then
+    TOTAL_STEPS=4
+else
+    TOTAL_STEPS=3
+fi
+STEP=0
+
+# ----- iOS Simulator arm64 -----
+STEP=$((STEP + 1))
 echo ""
-echo "[1/4] iOS Simulator (arm64)..."
+echo "[${STEP}/${TOTAL_STEPS}] iOS Simulator (arm64)..."
 build_arch "build-ios-sim-arm64" "iOS" "iphonesimulator" "arm64" "${IOS_MIN_OS_VERSION}"
 
-# ----- 2. iOS Simulator x86_64 -----
-echo ""
-echo "[2/4] iOS Simulator (x86_64)..."
-build_arch "build-ios-sim-x86_64" "iOS" "iphonesimulator" "x86_64" "${IOS_MIN_OS_VERSION}"
+# ----- iOS Simulator x86_64 (optional) -----
+if [[ "$INCLUDE_X86_64" == "1" ]]; then
+    STEP=$((STEP + 1))
+    echo ""
+    echo "[${STEP}/${TOTAL_STEPS}] iOS Simulator (x86_64)..."
+    build_arch "build-ios-sim-x86_64" "iOS" "iphonesimulator" "x86_64" "${IOS_MIN_OS_VERSION}"
+fi
 
-# ----- 3. iOS Device arm64 -----
+# ----- iOS Device arm64 -----
+STEP=$((STEP + 1))
 echo ""
-echo "[3/4] iOS Device (arm64)..."
+echo "[${STEP}/${TOTAL_STEPS}] iOS Device (arm64)..."
 build_arch "build-ios-device" "iOS" "iphoneos" "arm64" "${IOS_MIN_OS_VERSION}"
 
-# ----- 4. macOS arm64 -----
+# ----- macOS arm64 -----
+STEP=$((STEP + 1))
 echo ""
-echo "[4/4] macOS (arm64)..."
+echo "[${STEP}/${TOTAL_STEPS}] macOS (arm64)..."
 build_arch "build-macos" "Darwin" "macosx" "arm64" "${MACOS_MIN_OS_VERSION}"
 
-# ----- Combine simulator architectures with lipo -----
-echo ""
-echo "Combining simulator architectures..."
+# ----- Combine simulator architectures -----
 BASE_DIR="$(pwd)"
 
-# Collect lib names from one of the sim builds
-SIM_ARM64_LIBS=($(collect_static_libs "build-ios-sim-arm64"))
-SIM_X86_LIBS=($(collect_static_libs "build-ios-sim-x86_64"))
+if [[ "$INCLUDE_X86_64" == "1" ]]; then
+    echo ""
+    echo "Combining simulator architectures (arm64 + x86_64)..."
 
-mkdir -p build-ios-sim-fat/src
-mkdir -p build-ios-sim-fat/ggml/src/ggml-metal
-mkdir -p build-ios-sim-fat/ggml/src/ggml-blas
+    # Collect lib names from sim builds
+    SIM_ARM64_LIBS=($(collect_static_libs "build-ios-sim-arm64"))
+    SIM_X86_LIBS=($(collect_static_libs "build-ios-sim-x86_64"))
 
-# lipo each lib pair into a fat binary
-LIB_NAMES=("src/libwhisper.a" "ggml/src/libggml.a" "ggml/src/libggml-base.a" "ggml/src/libggml-cpu.a" "ggml/src/ggml-metal/libggml-metal.a" "ggml/src/ggml-blas/libggml-blas.a")
-for lib_rel in "${LIB_NAMES[@]}"; do
-    mkdir -p "build-ios-sim-fat/$(dirname "${lib_rel}")"
-    lipo -create \
-        "build-ios-sim-arm64/${lib_rel}" \
-        "build-ios-sim-x86_64/${lib_rel}" \
-        -output "build-ios-sim-fat/${lib_rel}"
-done
-echo "  Fat simulator libraries created."
+    mkdir -p build-ios-sim-fat/src
+    mkdir -p build-ios-sim-fat/ggml/src/ggml-metal
+    mkdir -p build-ios-sim-fat/ggml/src/ggml-blas
+
+    # lipo each lib pair into a fat binary
+    LIB_NAMES=("src/libwhisper.a" "ggml/src/libggml.a" "ggml/src/libggml-base.a" "ggml/src/libggml-cpu.a" "ggml/src/ggml-metal/libggml-metal.a" "ggml/src/ggml-blas/libggml-blas.a")
+    for lib_rel in "${LIB_NAMES[@]}"; do
+        mkdir -p "build-ios-sim-fat/$(dirname "${lib_rel}")"
+        lipo -create \
+            "build-ios-sim-arm64/${lib_rel}" \
+            "build-ios-sim-x86_64/${lib_rel}" \
+            -output "build-ios-sim-fat/${lib_rel}"
+    done
+    echo "  Fat simulator libraries created."
+    SIM_BUILD_DIR="build-ios-sim-fat"
+    SIM_ARCHS_LIST=("arm64" "x86_64")
+else
+    echo ""
+    echo "Using arm64-only simulator build..."
+    SIM_BUILD_DIR="build-ios-sim-arm64"
+    SIM_ARCHS_LIST=("arm64")
+fi
 
 # ----- Setup framework structures -----
 echo ""
 echo "Setting up framework structures..."
 
-FRAMEWORK_SIM="build-ios-sim-fat/framework/whisper.framework"
+FRAMEWORK_SIM="${SIM_BUILD_DIR}/framework/whisper.framework"
 FRAMEWORK_DEVICE="build-ios-device/framework/whisper.framework"
 FRAMEWORK_MACOS="build-macos/framework/whisper.framework"
 
@@ -439,20 +472,20 @@ setup_framework_structure "${FRAMEWORK_MACOS}" "${MACOS_MIN_OS_VERSION}" "macos"
 echo ""
 echo "Creating dynamic libraries..."
 
-# iOS Simulator (fat arm64+x86_64)
-echo "  iOS Simulator..."
-COMBINED_SIM="${BASE_DIR}/build-ios-sim-fat/temp/combined.a"
+# iOS Simulator
+echo "  iOS Simulator (${SIM_ARCHS_LIST[*]})..."
+COMBINED_SIM="${BASE_DIR}/${SIM_BUILD_DIR}/temp/combined.a"
 mkdir -p "$(dirname "${COMBINED_SIM}")"
 libtool -static -o "${COMBINED_SIM}" \
-    build-ios-sim-fat/src/libwhisper.a \
-    build-ios-sim-fat/ggml/src/libggml.a \
-    build-ios-sim-fat/ggml/src/libggml-base.a \
-    build-ios-sim-fat/ggml/src/libggml-cpu.a \
-    build-ios-sim-fat/ggml/src/ggml-metal/libggml-metal.a \
-    build-ios-sim-fat/ggml/src/ggml-blas/libggml-blas.a \
+    "${SIM_BUILD_DIR}/src/libwhisper.a" \
+    "${SIM_BUILD_DIR}/ggml/src/libggml.a" \
+    "${SIM_BUILD_DIR}/ggml/src/libggml-base.a" \
+    "${SIM_BUILD_DIR}/ggml/src/libggml-cpu.a" \
+    "${SIM_BUILD_DIR}/ggml/src/ggml-metal/libggml-metal.a" \
+    "${SIM_BUILD_DIR}/ggml/src/ggml-blas/libggml-blas.a" \
     2> >(grep -v "table of contents" >&2)
-create_dynamic_lib "${COMBINED_SIM}" "${FRAMEWORK_SIM}/whisper" "${BASE_DIR}/build-ios-sim-fat/dSYMs" "ios" "true" "arm64" "x86_64"
-rm -rf build-ios-sim-fat/temp
+create_dynamic_lib "${COMBINED_SIM}" "${FRAMEWORK_SIM}/whisper" "${BASE_DIR}/${SIM_BUILD_DIR}/dSYMs" "ios" "true" "${SIM_ARCHS_LIST[@]}"
+rm -rf "${SIM_BUILD_DIR}/temp"
 
 # iOS Device (arm64)
 echo "  iOS Device..."
@@ -489,7 +522,7 @@ echo ""
 echo "Creating xcframework..."
 xcodebuild -create-xcframework \
     -framework "${BASE_DIR}/${FRAMEWORK_SIM}" \
-    -debug-symbols "${BASE_DIR}/build-ios-sim-fat/dSYMs/whisper.dSYM" \
+    -debug-symbols "${BASE_DIR}/${SIM_BUILD_DIR}/dSYMs/whisper.dSYM" \
     -framework "${BASE_DIR}/${FRAMEWORK_DEVICE}" \
     -debug-symbols "${BASE_DIR}/build-ios-device/dSYMs/whisper.dSYM" \
     -framework "${BASE_DIR}/${FRAMEWORK_MACOS}" \
