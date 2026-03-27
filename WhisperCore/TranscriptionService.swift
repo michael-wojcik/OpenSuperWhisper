@@ -25,8 +25,10 @@ public class TranscriptionService: ObservableObject {
     private var transcriptionTask: Task<String, Error>? = nil
     private var isCancelled = false
 
-    public init() {
-        loadEngine()
+    public init(autoLoadEngine: Bool = true) {
+        if autoLoadEngine {
+            loadEngine()
+        }
     }
 
     public func cancelTranscription() {

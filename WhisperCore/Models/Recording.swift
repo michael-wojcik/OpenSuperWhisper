@@ -84,6 +84,7 @@ public class RecordingStore: ObservableObject {
     public static let shared = RecordingStore()
 
     @Published public private(set) var recordings: [Recording] = []
+    @Published public private(set) var databaseError: Error?
     private let dbQueue: DatabaseQueue
 
     private init() {
@@ -95,14 +96,30 @@ public class RecordingStore: ObservableObject {
 
         print("Database path: \(dbPath.path)")
 
+        var resolvedQueue: DatabaseQueue
         do {
             try FileManager.default.createDirectory(
                 at: appDirectory, withIntermediateDirectories: true)
-            dbQueue = try DatabaseQueue(path: dbPath.path)
-            try setupDatabase()
+            resolvedQueue = try DatabaseQueue(path: dbPath.path)
         } catch {
-            fatalError("Failed to setup database: \(error)")
+            print("Failed to setup database: \(error)")
+            databaseError = error
+            // Fall back to in-memory database so the app remains functional
+            resolvedQueue = try! DatabaseQueue()
         }
+        dbQueue = resolvedQueue
+        try? setupDatabase()
+    }
+
+    /// Creates an in-memory RecordingStore for testing.
+    /// Accessible via `@testable import WhisperCore`.
+    static func makeInMemory() throws -> RecordingStore {
+        return try RecordingStore(inMemory: true)
+    }
+
+    private init(inMemory: Bool) throws {
+        self.dbQueue = try DatabaseQueue()
+        try setupDatabase()
     }
 
     private nonisolated func setupDatabase() throws {

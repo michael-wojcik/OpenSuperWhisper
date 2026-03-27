@@ -35,7 +35,7 @@ public class LanguageUtil {
             let preferredLanguage = preferredLanguage.prefix(2).lowercased()
             return availableLanguages.contains(preferredLanguage) ? preferredLanguage : "en"
         } else {
-            return "eng"
+            return "en"
         }
     }
 }
